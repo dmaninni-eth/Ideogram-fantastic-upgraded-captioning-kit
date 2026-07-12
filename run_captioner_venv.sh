@@ -25,6 +25,8 @@ fi
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
 cd "$SCRIPT_DIR"
 
+export LD_LIBRARY_PATH="/usr/local/lib/ollama/cuda_v12:${LD_LIBRARY_PATH:-}"
+
 VENV_DIR=".venv"
 PYEXE="$VENV_DIR/bin/python"
 
