@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import difflib
+import gc
 import html
 import json
 import os
@@ -8843,6 +8844,19 @@ class MainWindow(QMainWindow):
 
 
 def main() -> None:
+    # Python's cyclic GC can run on *any* thread that happens to trip its
+    # allocation threshold — including our background QThreads (batch
+    # captioning, resource/server monitors). Widgets end up in reference
+    # cycles (parent/child + signal-connected closures over `self` are
+    # everywhere in this UI), so a collection pass on a worker thread can
+    # call a QWidget's C++ destructor there. Qt object teardown dispatches
+    # events and isn't thread-safe, so that races the GUI thread's own
+    # event delivery and segfaults (observed via coredumpctl: SIGSEGV in
+    # QObject::property()/notify_helper while another thread was mid
+    # QWidget::~QWidget()/deleteChildren()). Disabling automatic collection
+    # and driving it explicitly from a main-thread QTimer keeps all Qt
+    # object destruction on the GUI thread while still reclaiming cycles.
+    gc.disable()
     app = QApplication(sys.argv)
     app.setApplicationName("Ideogram4 Fantastic Upgraded Captioning Kit")
     app.setApplicationDisplayName("Ideogram4 Fantastic Upgraded Captioning Kit")
@@ -8851,6 +8865,10 @@ def main() -> None:
     window = MainWindow()
     window.setWindowIcon(icon)
     window.show()
+    gc_timer = QTimer()
+    gc_timer.setInterval(30_000)
+    gc_timer.timeout.connect(gc.collect)
+    gc_timer.start()
     sys.exit(app.exec())
 
 
