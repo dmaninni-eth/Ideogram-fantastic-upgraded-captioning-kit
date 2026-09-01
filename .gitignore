@@ -24,6 +24,7 @@ dist/
 .env.*
 captioner_settings.json
 captioner_model_profiles.json
+captioner_guidance_presets.json
 captioner_prompts/
 models/
 llama/
