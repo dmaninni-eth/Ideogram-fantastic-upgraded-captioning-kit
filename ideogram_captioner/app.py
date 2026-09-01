@@ -548,6 +548,10 @@ class BBoxItem(QGraphicsRectItem):
         self._update_z()
 
     def set_label(self, text: str) -> None:
+        # boundingRect() includes the label pill, whose width depends on the text,
+        # so the scene's spatial index must be told before the rect can change —
+        # skipping this desyncs QGraphicsScene's BSP tree and can crash on repaint.
+        self.prepareGeometryChange()
         self.label = text
         self.update()
 
