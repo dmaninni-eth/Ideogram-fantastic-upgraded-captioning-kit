@@ -4200,6 +4200,29 @@ class ElementRow(QWidget):
         super().mousePressEvent(event)
 
 
+class AspectPixmapLabel(QLabel):
+    """QLabel that keeps its pixmap scaled to fill the label, aspect preserved, as
+    the label itself is resized (e.g. by dragging a splitter)."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._orig: QPixmap | None = None
+
+    def setPixmapKeepAspect(self, pixmap: QPixmap | None) -> None:
+        self._orig = pixmap
+        self._rescale()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._rescale()
+
+    def _rescale(self) -> None:
+        if self._orig is None or self._orig.isNull() or self.width() <= 0 or self.height() <= 0:
+            return
+        super().setPixmap(self._orig.scaled(
+            self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+
 class GuidanceDialog(QDialog):
     """Dialog whose close (X / Esc / Close button) is routed through a gate that
     can apply, discard, or veto (keep open)."""
@@ -5018,8 +5041,8 @@ class MainWindow(QMainWindow):
         dlg = GuidanceDialog(self)
         dlg.setWindowTitle("Custom Caption Guidance")
         outer = QVBoxLayout(dlg)
-        body = QHBoxLayout()
-        outer.addLayout(body, 1)
+        body = QSplitter(Qt.Horizontal)
+        outer.addWidget(body, 1)
 
         # The folder/image editors, preset toolbars, and tag palette stacked in this
         # column sum to a tall intrinsic minimum height (QVBoxLayout's minimum is the
@@ -5034,7 +5057,7 @@ class MainWindow(QMainWindow):
         left_scroll.setWidgetResizable(True)
         left_scroll.setFrameShape(QFrame.NoFrame)
         left_scroll.setWidget(left_container)
-        body.addWidget(left_scroll, 3)
+        body.addWidget(left_scroll)
         if has_images:
             dlg_convert = ToggleSwitch()
             dlg_convert.setChecked(self._convert_active())
@@ -5113,7 +5136,12 @@ class MainWindow(QMainWindow):
             self._build_tag_palette(left, image_ed)
             left.addStretch(1)
             right = QVBoxLayout()
-            body.addLayout(right, 2)
+            right_container = QWidget()
+            right_container.setLayout(right)
+            body.addWidget(right_container)
+            body.setStretchFactor(0, 3)
+            body.setStretchFactor(1, 2)
+            body.setSizes([708, 472])
             nav = QHBoxLayout()
             prev_btn = QToolButton()
             prev_btn.setIcon(lucide_icon("chevron-left", self.theme.text_secondary, 18))
@@ -5128,7 +5156,7 @@ class MainWindow(QMainWindow):
             nav.addWidget(name_label, 1)
             nav.addWidget(next_btn)
             right.addLayout(nav)
-            preview = QLabel()
+            preview = AspectPixmapLabel()
             preview.setObjectName("Panel")
             preview.setAlignment(Qt.AlignCenter)
             preview.setMinimumWidth(380)
@@ -5144,9 +5172,10 @@ class MainWindow(QMainWindow):
                 img = self.images[state["idx"]]
                 pm = QPixmap(str(img))
                 if pm.isNull():
+                    preview.setPixmapKeepAspect(None)
                     preview.setText("(cannot load image)")
                 else:
-                    preview.setPixmap(pm.scaled(440, 720, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    preview.setPixmapKeepAspect(pm)
                 name_label.setText(f"{img.name}   ({state['idx'] + 1} / {len(self.images)})")
                 prev_btn.setEnabled(state["idx"] > 0)
                 next_btn.setEnabled(state["idx"] < len(self.images) - 1)
