@@ -5044,20 +5044,10 @@ class MainWindow(QMainWindow):
         body = QSplitter(Qt.Horizontal)
         outer.addWidget(body, 1)
 
-        # The folder/image editors, preset toolbars, and tag palette stacked in this
-        # column sum to a tall intrinsic minimum height (QVBoxLayout's minimum is the
-        # sum of every child's minimum, not just the tallest) — no combination of
-        # per-widget minimum-height tweaks lets the dialog itself shrink past that sum.
-        # Scrolling the column decouples it: the dialog can go as short as the toolbar
-        # rows need, with the rest reachable via scrollbar.
         left = QVBoxLayout()
         left_container = QWidget()
         left_container.setLayout(left)
-        left_scroll = QScrollArea()
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setFrameShape(QFrame.NoFrame)
-        left_scroll.setWidget(left_container)
-        body.addWidget(left_scroll)
+        body.addWidget(left_container)
         if has_images:
             dlg_convert = ToggleSwitch()
             dlg_convert.setChecked(self._convert_active())
