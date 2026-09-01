@@ -5106,6 +5106,12 @@ class MainWindow(QMainWindow):
             preview.setObjectName("Panel")
             preview.setAlignment(Qt.AlignCenter)
             preview.setMinimumWidth(380)
+            # QLabel::minimumSizeHint() defaults to sizeHint(), which for a pixmap label
+            # is the pixmap's own size — so without an explicit minimum height, showing a
+            # tall/portrait preview locks the *dialog's* minimum height to that image's
+            # height, making the window feel unresizable (it snaps back on every shrink
+            # attempt). Cap this label's floor independent of whatever image is loaded.
+            preview.setMinimumHeight(1)
             right.addWidget(preview, 1)
 
             def refresh_preview() -> None:
