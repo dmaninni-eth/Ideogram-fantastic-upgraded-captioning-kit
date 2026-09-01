@@ -4963,6 +4963,11 @@ class MainWindow(QMainWindow):
         # minimum so the stretch factor can actually compress it when the user shrinks
         # the window, instead of the intrinsic hint silently overriding the stretch.
         editor.setMinimumHeight(28)
+        # Guidance text is usually a sentence or two, not a page — cap the height so it
+        # doesn't balloon to fill whatever room the dialog happens to have (that's what
+        # made it feel oversized). left.addStretch() below absorbs the leftover space
+        # instead.
+        editor.setMaximumHeight(110)
         editor._pending = False
         editor._suppress = False
         editor.textChanged.connect(lambda e=editor: self._on_editor_text_changed(e))
@@ -5001,7 +5006,7 @@ class MainWindow(QMainWindow):
         row.addWidget(del_btn)
         row.addWidget(clear_btn)
         parent_layout.addLayout(row)
-        parent_layout.addWidget(editor, 1)
+        parent_layout.addWidget(editor)
         return editor
 
     def _open_guidance_expand(self) -> None:
@@ -5106,6 +5111,7 @@ class MainWindow(QMainWindow):
         if has_images:
             dlg.resize(1180, 820)
             self._build_tag_palette(left, image_ed)
+            left.addStretch(1)
             right = QVBoxLayout()
             body.addLayout(right, 2)
             nav = QHBoxLayout()
@@ -5162,6 +5168,7 @@ class MainWindow(QMainWindow):
             next_btn.clicked.connect(lambda: go(1))
             refresh_preview()
         else:
+            left.addStretch(1)
             dlg.resize(900, 760)
 
         def is_dirty() -> bool:
