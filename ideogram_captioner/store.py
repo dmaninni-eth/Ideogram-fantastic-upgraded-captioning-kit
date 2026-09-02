@@ -9,6 +9,7 @@ from .schema import IMAGE_EXTENSIONS, caption_from_plain_text, caption_health, d
 
 PROJECT_DIRNAME = ".captioner"
 PROJECT_FILENAME = "project.json"
+RECOVERY_FILENAME = "recovery.json"
 
 
 @dataclass
@@ -277,6 +278,37 @@ class CaptionStore:
 
     def project_path(self) -> Path:
         return self.project_dir() / PROJECT_FILENAME
+
+    def recovery_path(self) -> Path:
+        return self.project_dir() / RECOVERY_FILENAME
+
+    def save_recovery(self, pending: dict[str, Any]) -> None:
+        """Write unsaved edits (path -> caption dict) so they survive a crash. Best
+        effort: a failure here (e.g. disk full) shouldn't interrupt editing."""
+        try:
+            self.project_dir().mkdir(parents=True, exist_ok=True)
+            tmp = self.recovery_path().with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(pending, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(self.recovery_path())
+        except OSError:
+            pass
+
+    def load_recovery(self) -> dict[str, Any]:
+        """Unsaved edits left behind by a previous crash, or {} if none/unreadable."""
+        path = self.recovery_path()
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def clear_recovery(self) -> None:
+        try:
+            self.recovery_path().unlink()
+        except OSError:
+            pass
 
     def load_project(self) -> ProjectConfig:
         path = self.project_path()

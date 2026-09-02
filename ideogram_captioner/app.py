@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import difflib
+import faulthandler
 import gc
 import html
 import json
@@ -107,6 +108,8 @@ from .llm_captioning import (
     BUILTIN_OOM_HINT,
     ensure_server_running,
     stop_server_process,
+    spawn_server_watchdog,
+    stop_server_watchdog,
     find_llama_server,
     detect_gpus,
     recommend_profile_for_vram,
@@ -4311,12 +4314,20 @@ class MainWindow(QMainWindow):
         self._json_live_timer.setSingleShot(True)
         self._json_live_timer.setInterval(150)
         self._json_live_timer.timeout.connect(self._live_json_refresh)
+        # Debounced crash-recovery snapshot: written a couple seconds after the last
+        # edit so a segfault (or any hard crash) loses at most a couple seconds of
+        # work instead of everything since the last manual/autosave.
+        self._recovery_timer = QTimer(self)
+        self._recovery_timer.setSingleShot(True)
+        self._recovery_timer.setInterval(2000)
+        self._recovery_timer.timeout.connect(self._write_recovery_snapshot)
         self._user_zoomed = False
         self._ai_thread: AiJobThread | None = None
         self._job_running = False
         self._job_cancelled = False
         self._read_only = False
         self._server_proc = None   # llama-server process we launched (local mode)
+        self._server_watchdog = None  # reaper that kills it if we die unexpectedly
         self._server_popover = None
         self._server_reachable = None
         self._server_modelless = False
@@ -6799,8 +6810,10 @@ class MainWindow(QMainWindow):
         """A job launched a local llama-server; hold the handle so we can shut it
         down on exit. Replaces (and stops) any earlier handle we were tracking."""
         if self._server_proc is not None and self._server_proc is not proc:
+            stop_server_watchdog(self._server_watchdog)
             stop_server_process(self._server_proc)
         self._server_proc = proc
+        self._server_watchdog = spawn_server_watchdog(proc)
 
     # ---- managed llama.cpp: background update check + acquire flow -----------
 
@@ -7182,6 +7195,17 @@ class MainWindow(QMainWindow):
 
         # Center: tool strip + image/bbox editor view.
         self.scene = QGraphicsScene(self)
+        # rebuild_boxes() (duplicate/remove) tears down and recreates every BBoxItem
+        # in one shot; as soon as an old item's last Python reference drops, shiboken
+        # destroys its C++ object immediately. QGraphicsScene's default BSP-tree index
+        # only purges removed items lazily, on the next repaint — so a freed item can
+        # still be sitting in the tree when the view repaints, and dereferencing it
+        # segfaults deep in Qt's paint traversal (observed via coredumpctl: SIGSEGV in
+        # QGraphicsView::paintEvent right after a duplicate/remove, no Python frames
+        # near the fault). With only a handful of boxes per image, a linear scan costs
+        # nothing, and Qt's own docs recommend NoIndex for scenes with frequent
+        # add/remove churn like this one.
+        self.scene.setItemIndexMethod(QGraphicsScene.NoIndex)
         self.view = CanvasView(self.scene, self)
         self.view.setObjectName("Stage")
         self.view.setFrameShape(QFrame.NoFrame)
@@ -7569,9 +7593,40 @@ class MainWindow(QMainWindow):
             self._thumb_items[str(path)] = item
             item.setIcon(self._decorated_thumb(path))
             item.setText(self._thumb_label(path))
+        self._offer_recovery_restore()
         self.filmstrip.setCurrentRow(0)
         self._set_status(f"{len(self.images)} images in {Path(folder).name}")
         self._update_count_label()
+
+    def _offer_recovery_restore(self) -> None:
+        """If a previous session for this folder ended in a crash with unsaved
+        edits, offer to restore them from the on-disk snapshot _write_recovery_snapshot
+        left behind."""
+        if self.store is None:
+            return
+        raw = self.store.load_recovery()
+        if not raw:
+            return
+        valid_paths = {str(p) for p in self.images}
+        recovered = {k: v for k, v in raw.items() if k in valid_paths}
+        if not recovered:
+            self.store.clear_recovery()  # only stale entries (renamed/removed images)
+            return
+        choice = QMessageBox.question(
+            self,
+            "Recover unsaved edits",
+            f"Found {len(recovered)} unsaved edit(s) from a session that didn't close "
+            "normally (likely a crash). Restore them?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if choice == QMessageBox.Yes:
+            self._pending.update(recovered)
+            for key in recovered:
+                self._refresh_thumb_marker(Path(key))
+            self._set_status(f"Restored {len(recovered)} unsaved edit(s) from crash recovery.")
+        else:
+            self.store.clear_recovery()
 
     def settings_caption_ext(self) -> str:
         return ".json"
@@ -7751,6 +7806,25 @@ class MainWindow(QMainWindow):
         timer = getattr(self, "_json_live_timer", None)
         if timer is not None and getattr(self, "json_panel", None) and self.json_panel.isVisible():
             timer.start()
+        recovery_timer = getattr(self, "_recovery_timer", None)
+        if recovery_timer is not None:
+            recovery_timer.start()
+
+    def _write_recovery_snapshot(self) -> None:
+        """Best-effort disk snapshot of every unsaved edit, so a crash (segfault or
+        otherwise) loses at most the last couple seconds of work. Cheap: only runs a
+        couple seconds after typing stops, same debounce idea as the JSON preview."""
+        if self.store is None:
+            return
+        self.commit_caption_fields()
+        self.commit_element_fields()
+        snapshot = dict(self._pending)
+        if self.current is not None and self._dirty:
+            snapshot[str(self.current)] = self.current_caption
+        if snapshot:
+            self.store.save_recovery(snapshot)
+        else:
+            self.store.clear_recovery()
 
     def _live_json_refresh(self) -> None:
         if not getattr(self, "json_panel", None) or not self.json_panel.isVisible():
@@ -8161,6 +8235,7 @@ class MainWindow(QMainWindow):
                 pass
         self._refresh_thumb_marker(self.current)
         self.persist_guidance_if_dirty()
+        self._write_recovery_snapshot()
         if not silent:
             self._set_status(f"Saved {path.name}")
 
@@ -8186,6 +8261,8 @@ class MainWindow(QMainWindow):
         for path in self.images:
             self._refresh_thumb_marker(path)
         self.persist_guidance_if_dirty()
+        if self.store is not None:
+            self.store.clear_recovery()
         if failed:
             QMessageBox.critical(self, "Some captions could not be saved", "\n".join(failed))
         self._set_status(f"Saved {saved} edited caption(s).")
@@ -8208,6 +8285,8 @@ class MainWindow(QMainWindow):
 
     def _shutdown_server(self) -> None:
         """Stop the llama-server this app launched (local mode), if any."""
+        stop_server_watchdog(getattr(self, "_server_watchdog", None))
+        self._server_watchdog = None
         proc = getattr(self, "_server_proc", None)
         if proc is not None:
             stop_server_process(proc)
@@ -8240,6 +8319,8 @@ class MainWindow(QMainWindow):
             self._shutdown_server()
             event.accept()
         elif choice == QMessageBox.Discard:
+            if self.store is not None:
+                self.store.clear_recovery()
             self._shutdown_server()
             event.accept()
         else:
@@ -8923,6 +9004,17 @@ def main() -> None:
     # and driving it explicitly from a main-thread QTimer keeps all Qt
     # object destruction on the GUI thread while still reclaiming cycles.
     gc.disable()
+    # A real SIGSEGV/SIGABRT/etc. can't be safely "caught" and resumed from — by the
+    # time the OS delivers it, memory may already be corrupted, so continuing normal
+    # execution is undefined behavior. faulthandler installs its own signal-safe C
+    # handler (not regular Python signal delivery, which can't reliably run for a
+    # genuine hardware-fault SIGSEGV) that dumps the Python-level stack to this file
+    # the instant a fatal signal hits, then lets the process die normally — turning
+    # "SIGSEGV, cause unknown" into an actual line number to look at.
+    crash_log_dir = Path.home() / ".ideogram_captioner"
+    crash_log_dir.mkdir(parents=True, exist_ok=True)
+    crash_log_file = (crash_log_dir / "crash.log").open("a", encoding="utf-8")
+    faulthandler.enable(file=crash_log_file)
     app = QApplication(sys.argv)
     app.setApplicationName("Ideogram4 Fantastic Upgraded Captioning Kit")
     app.setApplicationDisplayName("Ideogram4 Fantastic Upgraded Captioning Kit")

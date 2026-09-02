@@ -2494,6 +2494,60 @@ def stop_server_process(process: subprocess.Popen | None) -> None:
         close_process_log(process)
 
 
+def spawn_server_watchdog(process: subprocess.Popen) -> subprocess.Popen | None:
+    """Spawn a tiny reaper that kills `process`'s whole group if we die before
+    stopping it ourselves — including a segfault. It blocks reading our end of a
+    pipe; the kernel closes that pipe the instant we exit for ANY reason, so the
+    server still gets reaped even though no cleanup code ran in the crashing
+    process. POSIX only — Windows relies on the normal shutdown path only."""
+    if os.name == "nt":
+        return None
+    try:
+        pgid = os.getpgid(process.pid)
+    except (ProcessLookupError, OSError):
+        return None
+    script = (
+        "import os,signal,sys,time\n"
+        "pgid=int(sys.argv[1])\n"
+        "sys.stdin.buffer.read()\n"  # blocks until our parent's pipe end closes
+        "try:\n"
+        "    os.killpg(pgid, signal.SIGTERM)\n"
+        "except ProcessLookupError:\n"
+        "    sys.exit(0)\n"
+        "time.sleep(5)\n"
+        "try:\n"
+        "    os.killpg(pgid, signal.SIGKILL)\n"
+        "except ProcessLookupError:\n"
+        "    pass\n"
+    )
+    try:
+        return subprocess.Popen(
+            [sys.executable, "-c", script, str(pgid)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return None
+
+
+def stop_server_watchdog(watchdog: subprocess.Popen | None) -> None:
+    """Retire a watchdog once its server was stopped the normal way — closing its
+    stdin lets it notice and exit immediately instead of sitting around idle."""
+    if watchdog is None:
+        return
+    try:
+        if watchdog.stdin is not None:
+            watchdog.stdin.close()
+        watchdog.wait(timeout=2)
+    except Exception:
+        try:
+            watchdog.kill()
+        except Exception:
+            pass
+
+
 def ensure_server_running(
     settings: CaptioningSettings,
     task: str,
